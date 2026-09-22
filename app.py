@@ -160,7 +160,14 @@ class DatabaseManager:
         self.db_path = db_path or get_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def get_connection(self) -> sqlite3.Connection:
+    def get_connection(self) -> Any:
+        db_url = os.environ.get("DATABASE_URL", "")
+        if db_url.startswith(("postgres://", "postgresql://")):
+            try:
+                import psycopg2
+                return psycopg2.connect(db_url)
+            except ImportError:
+                pass
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -465,6 +472,22 @@ class ServiceRequestHandler(BaseHTTPRequestHandler):
 
             if path == "/api/v1/items":
                 created = self.db.create_item(data)
+                if data.get("cascade"):
+                    try:
+                        import sys
+                        from pathlib import Path
+                        mesh_path = Path(__file__).resolve().parent.parent
+                        if str(mesh_path) not in sys.path:
+                            sys.path.insert(0, str(mesh_path))
+                        from event_mesh import dispatch_order_placed_workflow
+                        cascade_res = dispatch_order_placed_workflow(
+                            order_id=created.get("id"),
+                            user_id=data.get("customer_id", 1),
+                            total_amount=float(data.get("amount", 99.99)),
+                        )
+                        created["cascade"] = cascade_res
+                    except Exception as mesh_err:
+                        created["cascade"] = {"error": str(mesh_err)}
                 status_code = HTTPStatus.CREATED
                 self.send_json(status_code, created)
             else:
